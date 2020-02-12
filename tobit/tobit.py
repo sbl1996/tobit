@@ -182,16 +182,16 @@ class TobitKalmanLSTMLayer(jit.ScriptModule):
 
         cell = LayerNormLSTMCell if layer_norm else LSTMCell
 
-        self.cell_mean = LSTMCell(state_dim, hidden_dim)
+        self.cell_mean = cell(state_dim, hidden_dim)
         self.fc_mean = nn.Linear(hidden_dim, state_dim)
 
-        self.cell_F = LSTMCell(state_dim, hidden_dim)
+        self.cell_F = cell(state_dim, hidden_dim)
         self.fc_F = nn.Linear(hidden_dim, state_dim)
 
-        self.cell_Q = LSTMCell(state_dim, hidden_dim)
+        self.cell_Q = cell(state_dim, hidden_dim)
         self.fc_Q = nn.Linear(hidden_dim, state_dim)
 
-        self.cell_R = LSTMCell(state_dim, hidden_dim)
+        self.cell_R = cell(state_dim, hidden_dim)
         self.fc_R = nn.Linear(hidden_dim, obs_dim)
 
         self.H = nn.Parameter(H, requires_grad=False)
