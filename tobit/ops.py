@@ -24,3 +24,11 @@ def atleast_2d(t):
     elif t.dim() == 1:
         t = t[:, None]
     return t
+
+
+def batched_diag(t):
+    ts = t.unbind(0)
+    dts = []
+    for i in range(len(ts)):
+        dts.append(torch.diag(ts[i]))
+    return torch.stack(dts)

@@ -224,39 +224,6 @@ class LSTMLayer(jit.ScriptModule):
         return torch.stack(outputs), state
 
 
-class KalmanLSTMLayer(jit.ScriptModule):
-    def __init__(self, obs_dim, hidden_dim, state_dim):
-        super().__init__()
-        self.obs_dim = obs_dim
-        self.state_dim = state_dim
-        self.cell_y = LSTMCell(obs_dim, hidden_dim)
-        self.fc_y = nn.Linear(hidden_dim, obs_dim)
-        self.cell_P = LSTMCell(obs_dim, hidden_dim)
-        self.fc_P = nn.Linear(hidden_dim, state_dim * state_dim)
-        self.cell_R = LSTMCell(obs_dim, hidden_dim)
-        self.fc_R = nn.Linear(hidden_dim, obs_dim * obs_dim)
-
-    @jit.script_method
-    def forward(self, x, y, P, state_y, state_P, state_R):
-        # type: (Tensor, Tensor, Tensor, Tuple[Tensor, Tensor], Tuple[Tensor, Tensor], Tuple[Tensor, Tensor]) -> Tuple[Tensor, Tensor, Tensor, Tuple[Tensor, Tensor], Tuple[Tensor, Tensor], Tuple[Tensor, Tensor]]
-        seq_len = x.size(0)
-        batch_size = x.size(1)
-        xs = x.unbind(0)
-        outputs = torch.jit.annotate(List[Tensor], [])
-        for i in range(len(xs)):
-            y, state_y = self.cell_y(y, state_y)
-            y = self.fc_y(y)
-            P, state_P = self.cell_P(y, state_P)
-            P = self.fc_P(P).view(seq_len, batch_size, self.state_dim, self.state_dim)
-            R, state_R = self.cell_R(y, state_R)
-            R = self.fc_R(R).view(seq_len, batch_size, self.state_dim, self.state_dim)
-            K = P @ torch.inverse(P + R)
-
-
-            outputs += [out]
-        return torch.stack(outputs), state
-
-
 class ReverseLSTMLayer(jit.ScriptModule):
     def __init__(self, cell, *cell_args):
         super(ReverseLSTMLayer, self).__init__()

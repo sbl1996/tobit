@@ -1,0 +1,12 @@
+Metadata-Version: 2.1
+Name: tobit
+Version: 0.0.1
+Summary: tobit
+Home-page: https://github.com/sbl1996/tobit
+Author: HrvvI
+Author-email: sbl1996@126.com
+License: MIT
+Description: tobit
+Platform: UNKNOWN
+Requires-Python: >=3.6.0
+Description-Content-Type: text/markdown

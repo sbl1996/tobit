@@ -6,7 +6,7 @@ from typing import List, Tuple
 from torch import Tensor
 
 from tobit.standard import predict
-from tobit.ops import cdf, pdf, atleast_1d, atleast_2d
+from tobit.ops import cdf, pdf, atleast_1d, atleast_2d, batched_diag
 
 
 @torch.jit.script
@@ -137,12 +137,50 @@ class LSTMCell(jit.ScriptModule):
         return hy, (hy, cy)
 
 
+class LayerNormLSTMCell(jit.ScriptModule):
+
+    def __init__(self, input_size, hidden_size):
+        super(LayerNormLSTMCell, self).__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.weight_ih = Parameter(torch.randn(4 * hidden_size, input_size))
+        self.weight_hh = Parameter(torch.randn(4 * hidden_size, hidden_size))
+        # The layernorms provide learnable biases
+
+        ln = nn.LayerNorm
+
+        self.layernorm_i = ln(4 * hidden_size)
+        self.layernorm_h = ln(4 * hidden_size)
+        self.layernorm_c = ln(hidden_size)
+
+    @jit.script_method
+    def forward(self, input, state):
+        # type: (Tensor, Tuple[Tensor, Tensor]) -> Tuple[Tensor, Tuple[Tensor, Tensor]]
+        hx, cx = state
+        igates = self.layernorm_i(torch.mm(input, self.weight_ih.t()))
+        hgates = self.layernorm_h(torch.mm(hx, self.weight_hh.t()))
+        gates = igates + hgates
+        ingate, forgetgate, cellgate, outgate = gates.chunk(4, 1)
+
+        ingate = torch.sigmoid(ingate)
+        forgetgate = torch.sigmoid(forgetgate)
+        cellgate = torch.tanh(cellgate)
+        outgate = torch.sigmoid(outgate)
+
+        cy = self.layernorm_c((forgetgate * cx) + (ingate * cellgate))
+        hy = outgate * torch.tanh(cy)
+
+        return hy, (hy, cy)
+
+
 class TobitKalmanLSTMLayer(jit.ScriptModule):
 
-    def __init__(self, obs_dim, hidden_dim, state_dim, H, R, Tl, Tu):
+    def __init__(self, obs_dim, hidden_dim, state_dim, H, Tl, Tu, layer_norm=True):
         super().__init__()
         self.obs_dim = obs_dim
         self.state_dim = state_dim
+
+        cell = LayerNormLSTMCell if layer_norm else LSTMCell
 
         self.cell_mean = LSTMCell(state_dim, hidden_dim)
         self.fc_mean = nn.Linear(hidden_dim, state_dim)
@@ -153,14 +191,17 @@ class TobitKalmanLSTMLayer(jit.ScriptModule):
         self.cell_Q = LSTMCell(state_dim, hidden_dim)
         self.fc_Q = nn.Linear(hidden_dim, state_dim)
 
+        self.cell_R = LSTMCell(state_dim, hidden_dim)
+        self.fc_R = nn.Linear(hidden_dim, obs_dim)
+
         self.H = nn.Parameter(H, requires_grad=False)
-        self.R = nn.Parameter(R, requires_grad=False)
         self.Tl = nn.Parameter(Tl, requires_grad=False)
         self.Tu = nn.Parameter(Tu, requires_grad=False)
 
     @jit.script_method
-    def forward(self, x, y, P, state_y, state_F, state_Q):
-        # type: (Tensor, Tensor, Tensor, Tuple[Tensor, Tensor], Tuple[Tensor, Tensor], Tuple[Tensor, Tensor]) -> Tensor
+    def forward(self, x, y, P, state_y, state_F, state_Q, state_R):
+        # type: (Tensor, Tensor, Tensor, Tuple[Tensor, Tensor], Tuple[Tensor, Tensor], Tuple[Tensor, Tensor], Tuple[Tensor, Tensor]) -> Tensor
+        batch_size = x.size(1)
         xs = x.unbind(0)
         outputs = torch.jit.annotate(List[Tensor], [])
         for i in range(len(xs)):
@@ -168,31 +209,46 @@ class TobitKalmanLSTMLayer(jit.ScriptModule):
             y = self.fc_mean(y)
 
             F, state_F = self.cell_F(y, state_F)
-            F = self.fc_F(F).view(self.state_dim)
-            F = torch.diag(F)
+            F = self.fc_F(F)
 
             Q, state_Q = self.cell_Q(y, state_Q)
-            Q = self.fc_Q(Q).view(self.state_dim)
-            Q = torch.diag(Q)
+            Q = self.fc_Q(Q).exp()
 
-            P = torch.chain_matmul(F, P, F.t()) + Q
-            y, P = tobit_update(xs[i][0], y[0], P, self.H, self.R, self.Tl, self.Tu)
-            y = y[None]
+            R, state_R = self.cell_R(y, state_R)
+            R = self.fc_R(R).exp()
+
+            ys = []
+            Ps = []
+            for b in range(batch_size):
+                Fb = torch.diag(F[b])
+                Qb = torch.diag(Q[b])
+                Rb = torch.diag(R[b])
+                Pb = torch.chain_matmul(Fb, P[b], Fb.t()) + Qb
+                yb, Pb = tobit_update(xs[i][b], y[b], Pb, self.H, Rb, self.Tl, self.Tu)
+                ys.append(yb)
+                Ps.append(Pb)
+            y = torch.stack(ys)
+            P = torch.stack(Ps)
             outputs += [y]
         return torch.stack(outputs)
 
 
 class TobitKalmanLSTM(nn.Module):
 
-    def __init__(self, obs_dim, hidden_dim, state_dim, H, R, Tl, Tu):
+    def __init__(self, obs_dim, hidden_dim, state_dim, H, Tl, Tu):
         super().__init__()
-        layer = TobitKalmanLSTMLayer(obs_dim, hidden_dim, state_dim, H, R, Tl, Tu)
+        self.hidden_dim = hidden_dim
+        layer = TobitKalmanLSTMLayer(obs_dim, hidden_dim, state_dim, H, Tl, Tu)
         self.layer = torch.jit.script(layer)
-        self.h0 = nn.Parameter(H.new_zeros(1, hidden_dim), requires_grad=False)
-        self.c0 = nn.Parameter(H.new_zeros(1, hidden_dim), requires_grad=False)
 
     def forward(self, x, y, P):
-        state_y = (self.h0.data, self.c0.data)
-        state_F = (self.h0.data, self.c0.data)
-        state_Q = (self.h0.data, self.c0.data)
-        return self.layer(x, y, P, state_y, state_F, state_Q)
+        batch_size = x.size(1)
+        y = y[None].expand(batch_size, -1)
+        P = P[None].expand(batch_size, -1, -1)
+        h0 = x.new_zeros(batch_size, self.hidden_dim)
+        c0 = x.new_zeros(batch_size, self.hidden_dim)
+        state_y = (h0, c0)
+        state_F = (h0, c0)
+        state_Q = (h0, c0)
+        state_R = (h0, c0)
+        return self.layer(x, y, P, state_y, state_F, state_Q, state_R)
