@@ -1,12 +1,12 @@
 import torch
 import torch.nn as nn
-from torch.nn import Parameter
+from tobit.lstm import LSTMCell, LayerNormLSTMCell
 import torch.jit as jit
 from typing import List, Tuple
 from torch import Tensor
 
 from tobit.standard import predict
-from tobit.ops import cdf, pdf, atleast_1d, atleast_2d, batched_diag
+from tobit.ops import cdf, pdf, atleast_1d, atleast_2d
 
 
 @torch.jit.script
@@ -47,7 +47,7 @@ class TobitKalmanFilter:
                  transition_matrices=None, observation_matrices=None,
                  transition_covariance=None, observation_covariance=None,
                  initial_state_mean=None, initial_state_covariance=None,
-                 n_dim_obs=None, n_dim_state=None, cpp=True):
+                 n_dim_obs=None, n_dim_state=None, cpp=False):
         self.lower_limits = atleast_1d(lower_limits)
         self.upper_limits = atleast_1d(upper_limits)
         if transition_matrices is None:
@@ -105,72 +105,6 @@ class TobitKalmanFilter:
         state_means = torch.stack(state_means[1:])
         state_covariances = torch.stack(state_covariances[1:])
         return state_means, state_covariances
-
-
-class LSTMCell(jit.ScriptModule):
-
-    def __init__(self, input_size, hidden_size):
-        super().__init__()
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.weight_ih = Parameter(torch.randn(4 * hidden_size, input_size), requires_grad=True)
-        self.weight_hh = Parameter(torch.randn(4 * hidden_size, hidden_size), requires_grad=True)
-        self.bias_ih = Parameter(torch.randn(4 * hidden_size), requires_grad=True)
-        self.bias_hh = Parameter(torch.randn(4 * hidden_size), requires_grad=True)
-
-    @jit.script_method
-    def forward(self, input, state):
-        # type: (Tensor, Tuple[Tensor, Tensor]) -> Tuple[Tensor, Tuple[Tensor, Tensor]]
-        hx, cx = state
-        gates = (torch.mm(input, self.weight_ih.t()) + self.bias_ih +
-                 torch.mm(hx, self.weight_hh.t()) + self.bias_hh)
-        ingate, forgetgate, cellgate, outgate = gates.chunk(4, 1)
-
-        ingate = torch.sigmoid(ingate)
-        forgetgate = torch.sigmoid(forgetgate)
-        cellgate = torch.tanh(cellgate)
-        outgate = torch.sigmoid(outgate)
-
-        cy = (forgetgate * cx) + (ingate * cellgate)
-        hy = outgate * torch.tanh(cy)
-
-        return hy, (hy, cy)
-
-
-class LayerNormLSTMCell(jit.ScriptModule):
-
-    def __init__(self, input_size, hidden_size):
-        super(LayerNormLSTMCell, self).__init__()
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.weight_ih = Parameter(torch.randn(4 * hidden_size, input_size))
-        self.weight_hh = Parameter(torch.randn(4 * hidden_size, hidden_size))
-        # The layernorms provide learnable biases
-
-        ln = nn.LayerNorm
-
-        self.layernorm_i = ln(4 * hidden_size)
-        self.layernorm_h = ln(4 * hidden_size)
-        self.layernorm_c = ln(hidden_size)
-
-    @jit.script_method
-    def forward(self, input, state):
-        # type: (Tensor, Tuple[Tensor, Tensor]) -> Tuple[Tensor, Tuple[Tensor, Tensor]]
-        hx, cx = state
-        igates = self.layernorm_i(torch.mm(input, self.weight_ih.t()))
-        hgates = self.layernorm_h(torch.mm(hx, self.weight_hh.t()))
-        gates = igates + hgates
-        ingate, forgetgate, cellgate, outgate = gates.chunk(4, 1)
-
-        ingate = torch.sigmoid(ingate)
-        forgetgate = torch.sigmoid(forgetgate)
-        cellgate = torch.tanh(cellgate)
-        outgate = torch.sigmoid(outgate)
-
-        cy = self.layernorm_c((forgetgate * cx) + (ingate * cellgate))
-        hy = outgate * torch.tanh(cy)
-
-        return hy, (hy, cy)
 
 
 class TobitKalmanLSTMLayer(jit.ScriptModule):
@@ -254,3 +188,5 @@ class TobitKalmanLSTM(nn.Module):
         state_Q = (h0, c0)
         state_R = (h0, c0)
         return self.layer(x, y, P, state_y, state_F, state_Q, state_R)
+
+

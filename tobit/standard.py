@@ -28,7 +28,7 @@ class KalmanFilter:
     def __init__(self, transition_matrices=None, observation_matrices=None,
                  transition_covariance=None, observation_covariance=None,
                  initial_state_mean=None, initial_state_covariance=None,
-                 n_dim_obs=None, n_dim_state=None, cpp=True):
+                 n_dim_obs=None, n_dim_state=None, cpp=False):
         if transition_matrices is None:
             assert n_dim_state
             transition_matrices = torch.eye(n_dim_state, dtype=torch.float32)
