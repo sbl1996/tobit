@@ -186,7 +186,7 @@ class TobitKalmanLSTMLayer(jit.ScriptModule):
         self.fc_mean = nn.Linear(hidden_dim, state_dim)
 
         self.cell_F = cell(state_dim, hidden_dim)
-        self.fc_F = nn.Linear(hidden_dim, state_dim)
+        self.fc_F = nn.Linear(hidden_dim, state_dim * state_dim)
 
         self.cell_Q = cell(state_dim, hidden_dim)
         self.fc_Q = nn.Linear(hidden_dim, state_dim)
@@ -200,16 +200,18 @@ class TobitKalmanLSTMLayer(jit.ScriptModule):
 
     @jit.script_method
     def forward(self, x, y, P, state_y, state_F, state_Q, state_R):
-        # type: (Tensor, Tensor, Tensor, Tuple[Tensor, Tensor], Tuple[Tensor, Tensor], Tuple[Tensor, Tensor], Tuple[Tensor, Tensor]) -> Tensor
+        # type: (Tensor, Tensor, Tensor, Tuple[Tensor, Tensor], Tuple[Tensor, Tensor], Tuple[Tensor, Tensor], Tuple[Tensor, Tensor]) -> Tuple[Tensor, Tensor]
         batch_size = x.size(1)
         xs = x.unbind(0)
-        outputs = torch.jit.annotate(List[Tensor], [])
+        outputs1 = torch.jit.annotate(List[Tensor], [])
+        outputs2 = torch.jit.annotate(List[Tensor], [])
         for i in range(len(xs)):
             y, state_y = self.cell_mean(y, state_y)
             y = self.fc_mean(y)
+            outputs1 += [y]
 
             F, state_F = self.cell_F(y, state_F)
-            F = self.fc_F(F)
+            F = self.fc_F(F).view(batch_size, self.state_dim, self.state_dim)
 
             Q, state_Q = self.cell_Q(y, state_Q)
             Q = self.fc_Q(Q).exp()
@@ -220,7 +222,7 @@ class TobitKalmanLSTMLayer(jit.ScriptModule):
             ys = []
             Ps = []
             for b in range(batch_size):
-                Fb = torch.diag(F[b])
+                Fb = F[b]
                 Qb = torch.diag(Q[b])
                 Rb = torch.diag(R[b])
                 Pb = torch.chain_matmul(Fb, P[b], Fb.t()) + Qb
@@ -229,16 +231,16 @@ class TobitKalmanLSTMLayer(jit.ScriptModule):
                 Ps.append(Pb)
             y = torch.stack(ys)
             P = torch.stack(Ps)
-            outputs += [y]
-        return torch.stack(outputs)
+            outputs2 += [y]
+        return torch.stack(outputs1), torch.stack(outputs2)
 
 
 class TobitKalmanLSTM(nn.Module):
 
-    def __init__(self, obs_dim, hidden_dim, state_dim, H, Tl, Tu):
+    def __init__(self, obs_dim, hidden_dim, state_dim, H, Tl, Tu, layer_norm=False):
         super().__init__()
         self.hidden_dim = hidden_dim
-        layer = TobitKalmanLSTMLayer(obs_dim, hidden_dim, state_dim, H, Tl, Tu)
+        layer = TobitKalmanLSTMLayer(obs_dim, hidden_dim, state_dim, H, Tl, Tu, layer_norm)
         self.layer = torch.jit.script(layer)
 
     def forward(self, x, y, P):
